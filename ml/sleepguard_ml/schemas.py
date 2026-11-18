@@ -40,6 +40,7 @@ class Labels(BaseModel):
     events: List[Event] = []
     ahi: Optional[float] = None
     ahi_definition: Optional[str] = None
+    sleep_hours: Optional[float] = None  # total sleep time from the PSG; AHI is per hour of sleep
 
 
 class Recording(BaseModel):

@@ -2,7 +2,7 @@
 
     python scripts/convert_nsrr.py --source shhs --edf-dir ../data/raw/shhs/edfs/shhs1 \
         --xml-dir ../data/raw/shhs/annotations-events-nsrr/shhs1 --out ../data/sgr/shhs \
-        --ahi-csv ../data/raw/shhs/datasets/shhs1-dataset.csv --id-col nsrrid --ahi-col <AHI_VARIABLE>
+        --ahi-csv ../data/raw/shhs/datasets/shhs1-dataset.csv --id-col nsrrid --ahi-col ahi_a0h3
 
 Choose <AHI_VARIABLE> from the NSRR data dictionary (plan Section 6.3) and write it in the model card.
 """
@@ -21,6 +21,7 @@ p.add_argument("--out", required=True)
 p.add_argument("--ahi-csv")
 p.add_argument("--id-col")
 p.add_argument("--ahi-col")
+p.add_argument("--desat", type=float, default=3.0, help="hypopnea needs this %% SpO2 drop (3 for ahi_a0h3, 4 for ahi_a0h4)")
 p.add_argument("--limit", type=int, default=0, help="convert only the first N files (testing)")
 a = p.parse_args()
 
@@ -40,7 +41,8 @@ for edf in edfs:
     subject = m.group(1).lstrip("0") if m else edf.stem
     try:
         rec = convert_record(str(edf), str(xml), a.source, edf.stem,
-                             ahi=ahi.get(subject) or ahi.get(edf.stem), ahi_definition=a.ahi_col)
+                             ahi=ahi.get(subject) or ahi.get(edf.stem), ahi_definition=a.ahi_col,
+                             hypopnea_desat=a.desat)
         save_parquet(rec, out / f"{rec.recording_id}.parquet")
         ok += 1
     except Exception as e:
