@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 convert = ["pyedflib>=0.1.36"]
+train = ["xgboost>=2.0"]
 dev = ["pytest>=7", "matplotlib>=3.7", "jupyter"]
 
 [tool.setuptools.packages.find]
