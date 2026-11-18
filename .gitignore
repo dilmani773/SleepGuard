@@ -26,3 +26,7 @@ venv/
 .env
 .DS_Store
 Thumbs.db
+
+# ---- NSRR token: NEVER commit ----
+nsrr_token.txt
+*token*.txt
