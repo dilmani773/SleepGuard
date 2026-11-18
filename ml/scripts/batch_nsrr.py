@@ -14,7 +14,9 @@ import csv
 import random
 import shutil
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -39,6 +41,7 @@ p.add_argument("--ahi-col", default="ahi_a0h3")
 p.add_argument("--desat", type=float, default=3.0)
 p.add_argument("--keep-edf", action="store_true")
 p.add_argument("--dry-run", action="store_true")
+p.add_argument("--workers", type=int, default=4, help="nights downloaded at the same time")
 p.add_argument("--client", default="sleepguard-py", help="client tag in the download URL")
 a = p.parse_args()
 
@@ -106,28 +109,41 @@ def fetch(remote: str, dest: Path, retries: int = 3) -> Path:
     raise RuntimeError(f"download failed for {remote}: {last}")
 
 
+def process(sid: int):
+    name, t0 = f"shhs1-{sid}", time.time()
+    edf = fetch(f"shhs/polysomnography/edfs/shhs1/{name}.edf", edf_dir / f"{name}.edf")
+    xml = fetch(f"shhs/polysomnography/annotations-events-nsrr/shhs1/{name}-nsrr.xml",
+                xml_dir / f"{name}-nsrr.xml")
+    rec = convert_record(str(edf), str(xml), "shhs", name, ahi=ahi.get(sid),
+                         ahi_definition=a.ahi_col, hypopnea_desat=a.desat)
+    save_parquet(rec, out / f"{rec.recording_id}.parquet")
+    if not a.keep_edf:
+        edf.unlink()
+    vh = sum(v is not None for v in rec.spo2) / 3600
+    return [name, "ok", f"{vh:.2f}", rec.labels.sleep_hours, len(rec.labels.events),
+            rec.labels.ahi, f"{time.time() - t0:.0f}", ""]
+
+
+lock = threading.Lock()
 new_log = not log_path.exists()
-with open(log_path, "a", newline="") as fh:
+t_start = time.time()
+with open(log_path, "a", newline="") as fh, ThreadPoolExecutor(max_workers=a.workers) as pool:
     w = csv.writer(fh)
     if new_log:
         w.writerow(["name", "status", "valid_h", "sleep_h", "events", "ahi", "seconds", "note"])
-    for k, sid in enumerate(todo, 1):
-        name, t0 = f"shhs1-{sid}", time.time()
+    futures = {pool.submit(process, sid): sid for sid in todo}
+    for k, fut in enumerate(as_completed(futures), 1):
+        sid = futures[fut]
         try:
-            edf = fetch(f"shhs/polysomnography/edfs/shhs1/{name}.edf", edf_dir / f"{name}.edf")
-            xml = fetch(f"shhs/polysomnography/annotations-events-nsrr/shhs1/{name}-nsrr.xml",
-                        xml_dir / f"{name}-nsrr.xml")
-            rec = convert_record(str(edf), str(xml), "shhs", name, ahi=ahi.get(sid),
-                                 ahi_definition=a.ahi_col, hypopnea_desat=a.desat)
-            save_parquet(rec, out / f"{rec.recording_id}.parquet")
-            vh = sum(v is not None for v in rec.spo2) / 3600
-            w.writerow([name, "ok", f"{vh:.2f}", rec.labels.sleep_hours, len(rec.labels.events),
-                        rec.labels.ahi, f"{time.time() - t0:.0f}", ""])
-            if not a.keep_edf:
-                edf.unlink()
-            print(f"[{k}/{len(todo)}] {name} ok  valid_h={vh:.1f} ahi={rec.labels.ahi}")
+            row = fut.result()
+            msg = f"ok  ahi={row[5]}"
         except Exception as e:  # keep going; failures are logged and retried next run
-            w.writerow([name, "failed", "", "", "", "", f"{time.time() - t0:.0f}", str(e)[:200]])
-            print(f"[{k}/{len(todo)}] {name} FAILED: {e}")
-        fh.flush()
+            row = [f"shhs1-{sid}", "failed", "", "", "", "", "", str(e)[:200]]
+            msg = f"FAILED: {e}"
+        with lock:
+            w.writerow(row)
+            fh.flush()
+        rate = (time.time() - t_start) / k
+        left_h = rate * (len(todo) - k) / 3600
+        print(f"[{k}/{len(todo)}] {row[0]} {msg}   (~{left_h:.1f} h left)")
 print("finished. log:", log_path)
