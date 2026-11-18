@@ -1,0 +1,28 @@
+# ---- Data: NEVER commit (NSRR agreement) ----
+data/
+*.edf
+*.rec
+*.parquet
+*.annot
+nsrr/
+splits/
+
+# ---- ML artifacts ----
+mlruns/
+outputs/
+*.ckpt
+*.pt
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- Secrets / OS ----
+.env
+.DS_Store
+Thumbs.db

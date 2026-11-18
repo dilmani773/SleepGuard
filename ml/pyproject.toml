@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sleepguard-ml"
+version = "0.1.0"
+description = "SleepGuard: OSA screening from overnight SpO2 and pulse rate"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "pyarrow>=14",
+  "pydantic>=2.5",
+  "scikit-learn>=1.3",
+]
+
+[project.optional-dependencies]
+convert = ["pyedflib>=0.1.36"]
+dev = ["pytest>=7", "matplotlib>=3.7", "jupyter"]
+
+[tool.setuptools.packages.find]
+include = ["sleepguard_ml*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
