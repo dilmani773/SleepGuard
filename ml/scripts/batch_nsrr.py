@@ -1,10 +1,9 @@
 """Download, convert and clean up NSRR nights in batches (NSRR data user's machine ONLY).
 
-For each night: download the EDF + NSRR XML with the official `nsrr` tool,
+For each night: download the EDF + NSRR XML from sleepdata.org with your token,
 convert to SGR Parquet, then DELETE the EDF to save disk (~40 MB each).
 The XML is kept (small). Safe to stop and restart: finished nights are skipped.
 
-    pip install nsrr
     python scripts/batch_nsrr.py --n 1000 --dry-run      # show the plan
     python scripts/batch_nsrr.py --n 1000                # run (hours; leave it overnight)
 
@@ -14,12 +13,19 @@ import argparse
 import csv
 import random
 import shutil
-import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
+
+try:  # use the Windows / macOS certificate store (fixes CERTIFICATE_VERIFY_FAILED)
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
 
 from sleepguard_ml.converters.nsrr import convert_record
 from sleepguard_ml.io import save_parquet
@@ -33,6 +39,7 @@ p.add_argument("--ahi-col", default="ahi_a0h3")
 p.add_argument("--desat", type=float, default=3.0)
 p.add_argument("--keep-edf", action="store_true")
 p.add_argument("--dry-run", action="store_true")
+p.add_argument("--client", default="sleepguard-py", help="client tag in the download URL")
 a = p.parse_args()
 
 data = Path(a.data).resolve()
@@ -63,24 +70,40 @@ if a.dry_run:
     sys.exit(0)
 if not token.exists():
     sys.exit(f"token file missing: {token}")
-if shutil.which("nsrr") is None:
-    sys.exit("`nsrr` command not found. Run: pip install nsrr")
+TOKEN = token.read_text(encoding="utf-8").strip()
 
 
-def fetch(remote: str, dest: Path) -> Path:
-    """Download one file with the nsrr tool into tmp, then move it to dest."""
+def fetch(remote: str, dest: Path, retries: int = 3) -> Path:
+    """Download sleepdata.org/datasets/shhs/files/<remote> into dest.
+    URL pattern from the official NSRR R package (nsrr_download_url). Token never printed."""
     if dest.exists() and dest.stat().st_size > 0:
         return dest
-    for f in tmp.rglob("*"):
-        if f.is_file():
-            f.unlink()
-    r = subprocess.run(["nsrr", "-d", remote, "--token-file", str(token)],
-                       cwd=tmp, capture_output=True, text=True)
-    hits = [f for f in tmp.rglob(Path(remote).name) if f.is_file() and f.stat().st_size > 0]
-    if not hits:
-        raise RuntimeError(f"download failed for {remote}: {(r.stdout + r.stderr)[-300:]}")
-    shutil.move(str(hits[0]), dest)
-    return dest
+    dataset, path = remote.split("/", 1)
+    url = f"https://sleepdata.org/datasets/{dataset}/files/a/{TOKEN}/m/{a.client}/{path}"
+    part = tmp / (dest.name + ".part")
+    last = ""
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r, open(part, "wb") as fh:
+                shutil.copyfileobj(r, fh, length=1 << 20)
+            if part.stat().st_size == 0:
+                raise RuntimeError("empty file")
+            with open(part, "rb") as fh:
+                head = fh.read(200).lower()
+            if b"<html" in head or b"<!doctype" in head:
+                raise RuntimeError("got a web page instead of the file (token or access problem)")
+            shutil.move(str(part), dest)
+            return dest
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}"
+            if e.code in (401, 403, 404):
+                break
+        except Exception as e:
+            last = str(e).replace(TOKEN, "<token>")
+        time.sleep(3 * attempt)
+    if part.exists():
+        part.unlink()
+    raise RuntimeError(f"download failed for {remote}: {last}")
 
 
 new_log = not log_path.exists()
