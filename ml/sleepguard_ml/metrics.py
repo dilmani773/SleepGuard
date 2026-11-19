@@ -106,4 +106,6 @@ def bootstrap_ci(metric: Callable[[np.ndarray, np.ndarray], float], true, pred,
             continue
         if np.isfinite(v):
             vals.append(v)
+    if not vals:  # e.g. no positive nights in the set
+        return float("nan"), float("nan")
     return float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
