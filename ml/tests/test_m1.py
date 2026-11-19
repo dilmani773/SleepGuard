@@ -31,3 +31,23 @@ def test_m1_train_save_load(tmp_path):
     res = analyze(make_night("severe", hours=5, seed=99), m2)
     low = analyze(make_night("normal", hours=5, seed=98), m2)
     assert res.model_version.startswith("sg-m1") and res.ahi_est > low.ahi_est
+
+
+def test_hb_and_odi25_rise_with_severity():
+    from sleepguard_ml.features import night_features
+    from sleepguard_ml.io import to_arrays
+    from sleepguard_ml.preprocess import clean, valid_hours
+
+    def feats(sv):
+        s, h = clean(*to_arrays(make_night(sv, hours=5, seed=1)))
+        return night_features(s, h, valid_hours(s))
+
+    lo, hi = feats("normal"), feats("severe")
+    assert hi["hb"] > lo["hb"] >= 0 and hi["odi25"] > lo["odi25"]
+
+
+def test_calibration_saved(tmp_path):
+    recs = [make_night(sv, hours=4, seed=i) for i, sv in enumerate(["normal", "mild", "moderate", "severe"] * 3)]
+    m = train_m1(recs, n_folds=3, verbose=False)
+    m.save(tmp_path / "m1")
+    assert load_model(str(tmp_path / "m1")).calib == m.calib

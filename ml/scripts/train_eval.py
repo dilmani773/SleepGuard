@@ -24,6 +24,7 @@ p.add_argument("--split", default="../data/splits/shhs_split.json")
 p.add_argument("--eval", choices=["val", "test"], default="val")
 p.add_argument("--out", default="../data/models/m1")
 p.add_argument("--results", default="../data/results")
+p.add_argument("--tag", default="", help="added to the results file name, e.g. _v2")
 a = p.parse_args()
 
 t0 = time.time()
@@ -46,7 +47,8 @@ m1.save(a.out)
 true = np.array([r.labels.ahi for r in test])
 preds = {
     "M0_odi3_calibrated": np.array([analyze_baseline(r, m0).ahi_est or 0.0 for r in test]),
-    "M1_xgboost": np.array([analyze_m1(r, m1).ahi_est or 0.0 for r in test]),
+    "M1_raw": np.array([analyze_m1(r, m1, calibrated=False).ahi_est or 0.0 for r in test]),
+    "M1_calibrated": np.array([analyze_m1(r, m1).ahi_est or 0.0 for r in test]),
 }
 
 def sens(t, q):
@@ -69,6 +71,6 @@ for name, q in preds.items():
           f"{s30['sensitivity']:8.2f}{s30['specificity']:8.2f}")
 
 Path(a.results).mkdir(parents=True, exist_ok=True)
-out = Path(a.results) / f"m0_vs_m1_{a.eval}.json"
+out = Path(a.results) / f"m0_vs_m1_{a.eval}{a.tag}.json"
 out.write_text(json.dumps(report, indent=2))
 print(f"\nsaved {out}  ({time.time() - t0:.0f} s)")

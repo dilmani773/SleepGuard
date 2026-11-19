@@ -23,7 +23,14 @@ def severity_from_ahi(ahi: Optional[float], valid_hours: float) -> str:
     return "severe"
 
 
-def action_from_severity(severity: str) -> str:
+REFER_CUTOFF = 12.0  # predicted AHI; chosen on CV predictions (sens 0.95, spec 0.87 for AHI >= 15), 2026-11-19
+
+
+def action_from_severity(severity: str, ahi: Optional[float] = None) -> str:
+    """Screening action. With an AHI estimate, refer at AHI >= REFER_CUTOFF (12), which is
+    below the moderate cutoff on purpose: missing a patient costs more than an extra PSG."""
+    if ahi is not None and severity != "insufficient_data" and ahi >= REFER_CUTOFF:
+        return "refer_sleep_lab"
     return {
         "insufficient_data": "repeat_recording",
         "normal": "no_referral",

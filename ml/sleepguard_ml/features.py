@@ -89,6 +89,22 @@ def delta_index(spo2: np.ndarray, block: int = 12) -> float:
         return float(np.nanmean(np.abs(np.diff(b))))
 
 
+def hypoxic_burden(spo2: np.ndarray, valid_h: float, drop: float = 3.0, recovery: int = 30) -> float:
+    """Desaturation area per hour (%·min/h), after Azarbarzin 2019 / Qian 2026 (simplified):
+    for each >= `drop`% desaturation, sum (baseline - SpO2) from event start to `recovery` s after it."""
+    base = rolling_baseline(spo2, 120)
+    deficit = np.clip(base - spo2, 0, None)
+    deficit[~np.isfinite(deficit)] = 0.0
+    area = 0.0
+    last = 0
+    for s, e in detect_desaturations(spo2, BaselineModel(drop=drop)):
+        s = max(s, last)  # no double counting when events are close
+        e = min(e + recovery, len(spo2))
+        area += float(deficit[s:e].sum())
+        last = e
+    return area / 60.0 / max(valid_h, 1e-6)
+
+
 def night_features(spo2: np.ndarray, hr: np.ndarray, valid_h: float) -> dict:
     v = spo2[np.isfinite(spo2)]
     h = hr[np.isfinite(hr)]
@@ -97,6 +113,8 @@ def night_features(spo2: np.ndarray, hr: np.ndarray, valid_h: float) -> dict:
         "valid_h": valid_h,
         "odi3": len(detect_desaturations(spo2, BaselineModel(drop=3.0))) / vh,
         "odi4": len(detect_desaturations(spo2, BaselineModel(drop=4.0))) / vh,
+        "odi25": len(detect_desaturations(spo2, BaselineModel(drop=2.5, min_dur=5))) / vh,  # Wu 2026
+        "hb": hypoxic_burden(spo2, valid_h),  # Qian 2026
         "t90_frac": float((v < 90).mean()) if v.size else np.nan,
         "spo2_mean": float(v.mean()) if v.size else np.nan,
         "spo2_p5": float(np.percentile(v, 5)) if v.size else np.nan,

@@ -4,8 +4,9 @@ For each night: download the EDF + NSRR XML from sleepdata.org with your token,
 convert to SGR Parquet, then DELETE the EDF to save disk (~40 MB each).
 The XML is kept (small). Safe to stop and restart: finished nights are skipped.
 
-    python scripts/batch_nsrr.py --n 1000 --dry-run      # show the plan
-    python scripts/batch_nsrr.py --n 1000                # run (hours; leave it overnight)
+    python scripts/batch_nsrr.py --n 1000 --dry-run                 # SHHS: show the plan
+    python scripts/batch_nsrr.py --n 1000                           # SHHS: run (hours)
+    python scripts/batch_nsrr.py --dataset mesa --n 200 --dry-run   # MESA (external test set)
 
 Token: copy yours from https://sleepdata.org/token into ../data/nsrr_token.txt (git-ignored).
 """
@@ -33,10 +34,11 @@ from sleepguard_ml.converters.nsrr import convert_record
 from sleepguard_ml.io import save_parquet
 
 p = argparse.ArgumentParser()
+p.add_argument("--dataset", choices=["shhs", "mesa"], default="shhs")
 p.add_argument("--n", type=int, default=1000, help="number of nights to have in total")
 p.add_argument("--seed", type=int, default=42, help="random sample of subjects, fixed seed")
 p.add_argument("--data", default="../data")
-p.add_argument("--csv", default="raw/shhs/datasets/shhs1-dataset-0.21.0.csv")
+p.add_argument("--csv", default=None, help="dataset CSV (default depends on --dataset)")
 p.add_argument("--ahi-col", default="ahi_a0h3")
 p.add_argument("--desat", type=float, default=3.0)
 p.add_argument("--keep-edf", action="store_true")
@@ -45,19 +47,39 @@ p.add_argument("--workers", type=int, default=4, help="nights downloaded at the 
 p.add_argument("--client", default="sleepguard-py", help="client tag in the download URL")
 a = p.parse_args()
 
+# Per-dataset layout on sleepdata.org. Both use ahi_a0h3 (all apneas + hypopneas with >= 3% desat).
+DS = {
+    "shhs": dict(csv="raw/shhs/datasets/shhs1-dataset-0.21.0.csv", id_col="nsrrid",
+                 name=lambda i: f"shhs1-{i}",
+                 edf=lambda n: f"shhs/polysomnography/edfs/shhs1/{n}.edf",
+                 xml=lambda n: f"shhs/polysomnography/annotations-events-nsrr/shhs1/{n}-nsrr.xml",
+                 sub="shhs1"),
+    "mesa": dict(csv="raw/mesa/datasets/mesa-sleep-dataset-0.8.0.csv", id_col="mesaid",
+                 name=lambda i: f"mesa-sleep-{i:04d}",
+                 edf=lambda n: f"mesa/polysomnography/edfs/{n}.edf",
+                 xml=lambda n: f"mesa/polysomnography/annotations-events-nsrr/{n}-nsrr.xml",
+                 sub=""),
+}[a.dataset]
+
 data = Path(a.data).resolve()
 token = data / "nsrr_token.txt"
-out = data / "sgr" / "shhs"
-xml_dir = data / "raw" / "shhs" / "annotations-events-nsrr" / "shhs1"
-edf_dir = data / "raw" / "shhs" / "edfs" / "shhs1"
+out = data / "sgr" / a.dataset
+xml_dir = data / "raw" / a.dataset / "annotations-events-nsrr" / DS["sub"]
+edf_dir = data / "raw" / a.dataset / "edfs" / DS["sub"]
 tmp = data / "raw" / "_download_tmp"
-log_path = data / "sgr" / "shhs_batch_log.csv"
+log_path = data / "sgr" / f"{a.dataset}_batch_log.csv"
 for d in (out, xml_dir, edf_dir, tmp):
     d.mkdir(parents=True, exist_ok=True)
 
-df = pd.read_csv(data / a.csv, low_memory=False)
-ahi = dict(zip(df["nsrrid"].astype(int), df[a.ahi_col]))
-ids = sorted(int(i) for i in df["nsrrid"].dropna())
+df = pd.read_csv(data / (a.csv or DS["csv"]), low_memory=False)
+for col in (DS["id_col"], a.ahi_col):
+    if col not in df.columns:
+        sys.exit(f"column '{col}' not in the CSV. Columns with 'ahi': {[c for c in df.columns if 'ahi' in c.lower()][:20]}")
+df = df[df[DS["id_col"]].notna()]
+if a.dataset != "shhs":  # SHHS keeps its original sample so finished nights are still recognised
+    df = df[df[a.ahi_col].notna()]  # only people who had a PSG
+ahi = dict(zip(df[DS["id_col"]].astype(int), df[a.ahi_col]))
+ids = sorted(ahi)
 random.Random(a.seed).shuffle(ids)
 ids = ids[: a.n]
 
@@ -66,7 +88,7 @@ done_names = set()
 if log_path.exists():
     with open(log_path, newline="") as fh:
         done_names = {r["name"] for r in csv.DictReader(fh) if r["status"] == "ok"}
-todo = [i for i in ids if f"shhs1-{i}" not in done_names]
+todo = [i for i in ids if DS["name"](i) not in done_names]
 print(f"target {len(ids)} nights, already done {len(ids) - len(todo)}, to do {len(todo)}")
 if a.dry_run:
     print("first 10 to do:", todo[:10])
@@ -114,12 +136,11 @@ def fetch(remote: str, dest: Path, retries: int = 3) -> Path:
 
 
 def process(sid: int):
-    name, t0 = f"shhs1-{sid}", time.time()
-    edf = fetch(f"shhs/polysomnography/edfs/shhs1/{name}.edf", edf_dir / f"{name}.edf")
-    xml = fetch(f"shhs/polysomnography/annotations-events-nsrr/shhs1/{name}-nsrr.xml",
-                xml_dir / f"{name}-nsrr.xml")
+    name, t0 = DS["name"](sid), time.time()
+    edf = fetch(DS["edf"](name), edf_dir / f"{name}.edf")
+    xml = fetch(DS["xml"](name), xml_dir / f"{name}-nsrr.xml")
     try:
-        rec = convert_record(str(edf), str(xml), "shhs", name, ahi=ahi.get(sid),
+        rec = convert_record(str(edf), str(xml), a.dataset, name, ahi=ahi.get(sid),
                              ahi_definition=a.ahi_col, hypopnea_desat=a.desat)
     except Exception:
         edf.unlink(missing_ok=True)  # broken file: delete so the next run downloads it again
@@ -146,7 +167,7 @@ with open(log_path, "a", newline="") as fh, ThreadPoolExecutor(max_workers=a.wor
             row = fut.result()
             msg = f"ok  ahi={row[5]}"
         except Exception as e:  # keep going; failures are logged and retried next run
-            row = [f"shhs1-{sid}", "failed", "", "", "", "", "", str(e)[:200]]
+            row = [DS["name"](sid), "failed", "", "", "", "", "", str(e)[:200]]
             msg = f"FAILED: {e}"
         with lock:
             w.writerow(row)

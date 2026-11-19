@@ -65,7 +65,8 @@ class M1Model:
     window_cols: List[str] = field(default_factory=list)
     night_cols: List[str] = field(default_factory=list)
     threshold: float = 0.5
-    version: str = "sg-m1-0.1.0"
+    version: str = "sg-m1-0.2.0"
+    calib: tuple = (1.0, 0.0)  # AHI = a * raw + b, fitted on out-of-fold night predictions
 
     def save(self, folder) -> None:
         f = Path(folder)
@@ -74,7 +75,8 @@ class M1Model:
         self.night_model.save_model(str(f / "night.json"))
         (f / "meta.json").write_text(json.dumps({
             "window_cols": self.window_cols, "night_cols": self.night_cols,
-            "threshold": self.threshold, "version": self.version}, indent=2))
+            "threshold": self.threshold, "version": self.version,
+            "calib": list(self.calib)}, indent=2))
 
     @classmethod
     def load(cls, folder) -> "M1Model":
@@ -84,10 +86,12 @@ class M1Model:
         wm, nm = XGBClassifier(), XGBRegressor()
         wm.load_model(str(f / "window.json"))
         nm.load_model(str(f / "night.json"))
-        return cls(wm, nm, meta["window_cols"], meta["night_cols"], meta["threshold"], meta["version"])
+        return cls(wm, nm, meta["window_cols"], meta["night_cols"], meta["threshold"], meta["version"],
+                   tuple(meta.get("calib", (1.0, 0.0))))
 
 
-def train_m1(recs: Sequence[Recording], n_folds: int = 5, seed: int = 0, verbose: bool = True) -> M1Model:
+def train_m1(recs: Sequence[Recording], n_folds: int = 5, seed: int = 0, verbose: bool = True,
+             drop_night_cols: Sequence[str] = ()) -> M1Model:
     """Window model on all train windows; night model on out-of-fold window probabilities
     (so stage 2 never sees probabilities from a model that trained on the same night)."""
     from xgboost import XGBClassifier, XGBRegressor
@@ -118,25 +122,42 @@ def train_m1(recs: Sequence[Recording], n_folds: int = 5, seed: int = 0, verbose
     thr = 0.5
     night = pd.DataFrame([stage2_row(t[0], t[1], t[2], p, thr) for t, p in zip(tabs, oof)])
     ahi = np.array([r.labels.ahi for r in recs], float)
-    ncols = list(night.columns)
+    ncols = [c for c in night.columns if c not in set(drop_night_cols)]
+    # Calibration: a model trained on log(AHI) shrinks predictions toward the middle, so it
+    # under-predicts severe nights. Fit a straight line from out-of-fold night predictions to true AHI.
+    raw_oof = np.zeros(len(recs))
+    for k in range(n_folds):
+        tr, te = folds != k, folds == k
+        m = XGBRegressor(**NIGHT_PARAMS, random_state=seed)
+        m.fit(night.loc[tr, ncols], np.log1p(ahi[tr]))
+        raw_oof[te] = np.expm1(m.predict(night.loc[te, ncols]))
+    a_, b_ = np.polyfit(raw_oof, ahi, 1)
+    if verbose:
+        print(f"  calibration: AHI = {a_:.2f} * raw + {b_:.2f}")
+
     nm = XGBRegressor(**NIGHT_PARAMS, random_state=seed)
     nm.fit(night[ncols], np.log1p(ahi))  # log scale: AHI is very skewed
-    return M1Model(wm, nm, cols, ncols, thr)
+    return M1Model(wm, nm, cols, ncols, thr, calib=(float(a_), float(b_)))
 
 
-def analyze_m1(rec: Recording, model: M1Model) -> AnalysisResult:
+def analyze_m1(rec: Recording, model: M1Model, calibrated: bool = True) -> AnalysisResult:
     spo2, hr = clean(*to_arrays(rec))
     vh = valid_hours(spo2)
     wf = window_features(spo2, hr)
     prob = model.window_model.predict_proba(wf[model.window_cols])[:, 1]
     row = pd.DataFrame([stage2_row(spo2, hr, wf, prob, model.threshold)])[model.night_cols]
-    ahi = float(max(np.expm1(model.night_model.predict(row)[0]), 0.0)) if vh > 0 else None
+    ahi = None
+    if vh > 0:
+        ahi = float(np.expm1(model.night_model.predict(row)[0]))
+        if calibrated:
+            ahi = model.calib[0] * ahi + model.calib[1]
+        ahi = max(ahi, 0.0)
     sev = severity_from_ahi(ahi, vh)
     ev = merged_events(wf["start"].to_numpy(), prob, model.threshold)
     return AnalysisResult(
         recording_id=rec.recording_id, model_version=model.version,
         valid_hours=round(vh, 2), ahi_est=None if ahi is None else round(ahi, 1),
-        severity=sev, action=action_from_severity(sev),
+        severity=sev, action=action_from_severity(sev, ahi),
         odi3=round(float(row["odi3"].iloc[0]), 1) if "odi3" in row else None,
         events=[DetectedEvent(start=s, end=e, prob=round(p, 3)) for s, e, p in ev],
         quality=Quality(valid_fraction=round(float(np.isfinite(spo2).mean()) if spo2.size else 0.0, 3),
