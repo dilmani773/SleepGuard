@@ -60,6 +60,8 @@ def window_features(spo2: np.ndarray, hr: np.ndarray, win: int = WIN, step: int 
             "hr_mean": _nanstat(np.mean, h),
             "hr_std": _nanstat(np.std, h),
             "hr_rise_max": _nanstat(np.max, hrr),
+            # how much SpO2 jumps second to second: high on a noisy sensor, near 0 on a clean one
+            "jitter": _nanstat(np.mean, np.abs(np.diff(s))) if len(s) > 1 else np.nan,
         })
     df = pd.DataFrame(rows)
     # neighbour context: SpO2 dips come 10 to 30 s after the breathing event
@@ -121,4 +123,12 @@ def night_features(spo2: np.ndarray, hr: np.ndarray, valid_h: float) -> dict:
         "delta_index": delta_index(spo2),
         "hr_mean": float(h.mean()) if h.size else np.nan,
         "hr_std": float(h.std()) if h.size else np.nan,
+        "spo2_jitter": spo2_jitter(spo2),
     }
+
+
+def spo2_jitter(spo2: np.ndarray) -> float:
+    """Mean absolute second-to-second change: tells the model how noisy the sensor is."""
+    d = np.abs(np.diff(spo2))
+    d = d[np.isfinite(d)]
+    return float(d.mean()) if d.size else np.nan

@@ -26,8 +26,18 @@ NIGHT_PARAMS = dict(n_estimators=300, max_depth=3, learning_rate=0.05, subsample
                     colsample_bytree=0.8, objective="reg:squarederror", n_jobs=-1)
 
 
-def recording_tables(rec: Recording):
+def prepare(rec: Recording, prefilter: int = 0):
+    """Clean signals; optional centred rolling median over `prefilter` seconds to remove noise spikes."""
     spo2, hr = clean(*to_arrays(rec))
+    if prefilter and prefilter > 1:
+        gap = ~np.isfinite(spo2)
+        spo2 = pd.Series(spo2).rolling(prefilter, center=True, min_periods=1).median().to_numpy(copy=True)
+        spo2[gap] = np.nan  # keep gaps as gaps
+    return spo2, hr
+
+
+def recording_tables(rec: Recording, prefilter: int = 0):
+    spo2, hr = prepare(rec, prefilter)
     wf = window_features(spo2, hr)
     events = [(e.start, e.end) for e in rec.labels.events] if rec.labels else []
     y = window_labels(wf["start"].to_numpy(), len(spo2), events)
@@ -67,6 +77,7 @@ class M1Model:
     threshold: float = 0.5
     version: str = "sg-m1-0.2.0"
     calib: tuple = (1.0, 0.0)  # AHI = a * raw + b, fitted on out-of-fold night predictions
+    prefilter: int = 0  # seconds of rolling median applied to SpO2 before features (0 = none)
 
     def save(self, folder) -> None:
         f = Path(folder)
@@ -76,7 +87,7 @@ class M1Model:
         (f / "meta.json").write_text(json.dumps({
             "window_cols": self.window_cols, "night_cols": self.night_cols,
             "threshold": self.threshold, "version": self.version,
-            "calib": list(self.calib)}, indent=2))
+            "calib": list(self.calib), "prefilter": self.prefilter}, indent=2))
 
     @classmethod
     def load(cls, folder) -> "M1Model":
@@ -87,19 +98,36 @@ class M1Model:
         wm.load_model(str(f / "window.json"))
         nm.load_model(str(f / "night.json"))
         return cls(wm, nm, meta["window_cols"], meta["night_cols"], meta["threshold"], meta["version"],
-                   tuple(meta.get("calib", (1.0, 0.0))))
+                   tuple(meta.get("calib", (1.0, 0.0))), int(meta.get("prefilter", 0)))
 
 
 def train_m1(recs: Sequence[Recording], n_folds: int = 5, seed: int = 0, verbose: bool = True,
-             drop_night_cols: Sequence[str] = ()) -> M1Model:
+             drop_night_cols: Sequence[str] = (), augment: int = 0, prefilter: int = 0,
+             drop_window_cols: Sequence[str] = ()) -> M1Model:
     """Window model on all train windows; night model on out-of-fold window probabilities
-    (so stage 2 never sees probabilities from a model that trained on the same night)."""
+    (so stage 2 never sees probabilities from a model that trained on the same night).
+
+    augment=k adds k cheap-sensor copies of every night (noise, bias, averaging, dropouts).
+    Copies of a night always sit in the same fold as the original, so nothing leaks."""
     from xgboost import XGBClassifier, XGBRegressor
 
-    tabs = [recording_tables(r) for r in recs]
-    cols = [c for c in tabs[0][2].columns if c != "start"]
+    from .augment import perturb, random_cheap_sensor
+
+    n0 = len(recs)
+    group = list(range(n0))
+    if augment:
+        extra = [perturb(r, random_cheap_sensor, seed * 100003 + 1000 * j + i)
+                 for j in range(augment) for i, r in enumerate(recs)]
+        recs = list(recs) + extra
+        group += [i for _ in range(augment) for i in range(n0)]
+        if verbose:
+            print(f"  augmented: {n0} nights + {len(extra)} cheap-sensor copies")
+    group = np.array(group)
+
+    tabs = [recording_tables(r, prefilter) for r in recs]
+    cols = [c for c in tabs[0][2].columns if c != "start" and c not in set(drop_window_cols)]
     rng = np.random.default_rng(seed)
-    folds = rng.permutation(len(recs)) % n_folds
+    folds = (rng.permutation(n0) % n_folds)[group]
 
     oof = [None] * len(recs)
     for k in range(n_folds):
@@ -137,11 +165,12 @@ def train_m1(recs: Sequence[Recording], n_folds: int = 5, seed: int = 0, verbose
 
     nm = XGBRegressor(**NIGHT_PARAMS, random_state=seed)
     nm.fit(night[ncols], np.log1p(ahi))  # log scale: AHI is very skewed
-    return M1Model(wm, nm, cols, ncols, thr, calib=(float(a_), float(b_)))
+    return M1Model(wm, nm, cols, ncols, thr, version="sg-m1-0.3.0" if (augment or prefilter) else "sg-m1-0.2.0",
+                   calib=(float(a_), float(b_)), prefilter=prefilter)
 
 
 def analyze_m1(rec: Recording, model: M1Model, calibrated: bool = True) -> AnalysisResult:
-    spo2, hr = clean(*to_arrays(rec))
+    spo2, hr = prepare(rec, model.prefilter)
     vh = valid_hours(spo2)
     wf = window_features(spo2, hr)
     prob = model.window_model.predict_proba(wf[model.window_cols])[:, 1]
