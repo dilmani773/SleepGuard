@@ -88,9 +88,13 @@ def fetch(remote: str, dest: Path, retries: int = 3) -> Path:
     for attempt in range(1, retries + 1):
         try:
             with urllib.request.urlopen(url, timeout=120) as r, open(part, "wb") as fh:
+                expected = int(r.headers.get("Content-Length") or 0)
                 shutil.copyfileobj(r, fh, length=1 << 20)
-            if part.stat().st_size == 0:
+            got = part.stat().st_size
+            if got == 0:
                 raise RuntimeError("empty file")
+            if expected and got != expected:  # connection dropped mid-file
+                raise RuntimeError(f"incomplete download ({got} of {expected} bytes)")
             with open(part, "rb") as fh:
                 head = fh.read(200).lower()
             if b"<html" in head or b"<!doctype" in head:
@@ -114,8 +118,12 @@ def process(sid: int):
     edf = fetch(f"shhs/polysomnography/edfs/shhs1/{name}.edf", edf_dir / f"{name}.edf")
     xml = fetch(f"shhs/polysomnography/annotations-events-nsrr/shhs1/{name}-nsrr.xml",
                 xml_dir / f"{name}-nsrr.xml")
-    rec = convert_record(str(edf), str(xml), "shhs", name, ahi=ahi.get(sid),
-                         ahi_definition=a.ahi_col, hypopnea_desat=a.desat)
+    try:
+        rec = convert_record(str(edf), str(xml), "shhs", name, ahi=ahi.get(sid),
+                             ahi_definition=a.ahi_col, hypopnea_desat=a.desat)
+    except Exception:
+        edf.unlink(missing_ok=True)  # broken file: delete so the next run downloads it again
+        raise
     save_parquet(rec, out / f"{rec.recording_id}.parquet")
     if not a.keep_edf:
         edf.unlink()
