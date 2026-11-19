@@ -1,6 +1,6 @@
 # sleepguard-ml
 
-ML package for SleepGuard. Owner: Inaaya (+ Model member).
+ML package for SleepGuard. Owner: Hiyumi (+ Model member).
 Covers interface I2 (SGR format) and I4 (`analyze()`), dataset converters, the M0 baseline and evaluation metrics.
 
 ## Setup (Windows, VS Code terminal)
@@ -61,7 +61,7 @@ Use synthetic data only to test code. Real numbers come from UCD, SHHS and MESA.
    ```
    If `pyedflib` will not open a `.rec` file, copy it with an `.edf` extension.
 
-### 2. SHHS / MESA (after NSRR approval, Inaaya only)
+### 2. SHHS / MESA (after NSRR approval, Hiyumi only)
 
 1. Download with the NSRR tools into `data/raw/shhs/` on the secure laptop.
 2. Pick ONE AHI variable from the NSRR data dictionary. Write it in the model card.
@@ -70,7 +70,7 @@ Use synthetic data only to test code. Real numbers come from UCD, SHHS and MESA.
 
 ## NSRR rules (do not break these)
 
-- SHHS / MESA files and converted Parquet files stay on Inaaya's secure laptop. Never in git, Drive or Colab.
+- SHHS / MESA files and converted Parquet files stay on Hiyumi's secure laptop. Never in git, Drive or Colab.
 - Share results (tables, metric plots) only. Never a participant's signal plot.
 - Acknowledge `NSRR R24 HL114473` and cite SHHS / MESA in every paper or slide deck.
 
